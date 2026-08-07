@@ -1,0 +1,11 @@
+# Apptainer images are huge and user-specific
+*.sif
+
+# Runtime artifact folders (created under %LOCALAPPDATA% during install)
+logs/
+repos/
+
+# OS / editor noise
+*.log
+.DS_Store
+Thumbs.db
