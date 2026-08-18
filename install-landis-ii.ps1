@@ -82,6 +82,7 @@ function Show-Header {
     Write-Host "        LANDIS-II Docker Installer" -ForegroundColor Cyan
     Write-Host "   Forest Landscape Model via Docker on Windows" -ForegroundColor Cyan
     Write-Host "   Version 1.0.0" -ForegroundColor DarkGray
+    Write-Host "   By Clément Hardy, PhD." -ForegroundColor DarkGray
     Write-Host "  ============================================" -ForegroundColor Cyan
     Write-Host ""
 }
@@ -494,7 +495,7 @@ function Build-BaseImage {
     }
 
     $workDir = "$repoDir\landis-base"
-    if (-not (Get-GitRepo -Url 'https://github.com/LANDIS-II-Foundation/Tool-Docker-Apptainer' -Dest $workDir -Commit '043b43e6291813d5092721d45ff630502e777e30')) {
+    if (-not (Get-GitRepo -Url 'https://github.com/LANDIS-II-Foundation/Tool-Docker-Apptainer' -Dest $workDir -Commit '4a91482c8ef39553ab9ff687b929d2ac8c071862')) {
         return $false
     }
 
@@ -520,7 +521,7 @@ function Build-DiverseImage {
     }
 
     $workDir = "$repoDir\landis-diverse"
-    if (-not (Get-GitRepo -Url 'https://github.com/Klemet/Docker-LANDIS-II-v8-DIVERSE' -Dest $workDir -Commit '0953f5809bd483ec23a8e5a1f1f8878da6efc408')) {
+    if (-not (Get-GitRepo -Url 'https://github.com/Klemet/Docker-LANDIS-II-v8-DIVERSE' -Dest $workDir -Commit '69c5509ee6f4e085f023e4e45c1dce4bb583612a')) {
         return $false
     }
 
