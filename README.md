@@ -2,6 +2,8 @@
 
 > One-click install of the [LANDIS-II](https://landis-ii.org/) Forest Landscape Model on Windows, running entirely inside Docker — no Linux environment, no manual dependency setup, no pain.
 
+**⚠ Currently installs the Docker image from [https://github.com/Klemet/Docker-LANDIS-II-v8-DIVERSE](https://github.com/Klemet/Docker-LANDIS-II-v8-DIVERSE). Future versions will allow for customising the image installed.**
+
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1+-5391FE?logo=powershell&logoColor=white)](#)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D6?logo=windows&logoColor=white)](#)
 [![Made for researchers](https://img.shields.io/badge/For-Forest%20Researchers-2ea44f)](#)
