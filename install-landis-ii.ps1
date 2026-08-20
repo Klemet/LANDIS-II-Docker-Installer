@@ -50,11 +50,10 @@ if (-not (Test-IsAdmin)) {
     Write-Host "  ERROR: This script must be run as an Administrator." -ForegroundColor Red
     Write-Host "  Elevated privileges are required, especially on government/restricted machines." -ForegroundColor Red
     Write-Host ""
-    Write-Host "  Re-launching with elevated privileges..." -ForegroundColor Yellow
-    Start-Sleep -Seconds 2
-    Start-Process -Verb RunAs -FilePath powershell.exe `
-        -ArgumentList "-ExecutionPolicy Bypass -File ""$PSCommandPath""" 
-    exit
+    Write-Host "  Please run the provided LANDIS-II-Docker-Installer.exe (it requests elevation" -ForegroundColor Yellow
+    Write-Host "  automatically), or right-click this script and choose 'Run as administrator'." -ForegroundColor Yellow
+    Read-Host "  Press ENTER to exit"
+    exit 1
 }
 
 # ==== GLOBAL STATE ============================================================
@@ -95,26 +94,104 @@ function Pause-Prompt {
 
 # ==== FOLDER PICKER / BUILD HELPERS ===========================================
 
-function Select-FolderModern {
-    param(
-        [string]$InitialDirectory = [Environment]::GetFolderPath('Desktop'),
-        [string]$Title = 'Select a folder'
-    )
-    Add-Type -AssemblyName System.Windows.Forms
+# Native modern "pick a folder" dialog (Win10/11 style) via IFileOpenDialog + FOS_PICKFOLDERS.
+# The COM interop is done in C# (where coclass->interface casting is reliable) and exposed
+# as a simple static method. Unlike the old OpenFileDialog hack, the dialog's "Select Folder"
+# button always confirms the highlighted folder instead of sometimes just navigating into it.
+Add-Type -AssemblyName System.Windows.Forms
+if (-not ("NativeInterop.FolderPicker" -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
 
-    $dlg = New-Object System.Windows.Forms.OpenFileDialog
-    $dlg.InitialDirectory = $InitialDirectory
-    $dlg.Title            = $Title
-    $dlg.Filter           = 'Folders|*.folder'
-    $dlg.FileName         = 'Select Folder'
-    $dlg.CheckFileExists  = $false
-    $dlg.CheckPathExists  = $true
-    $dlg.ValidateNames    = $false
+namespace NativeInterop
+{
+    [ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+    public class FileOpenDialogRCW { }
 
-    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        return [System.IO.Path]::GetDirectoryName($dlg.FileName)
+    [ComImport, Guid("42F85136-DB7E-439C-85F1-E4075D135FC8"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IFileOpenDialog
+    {
+        [PreserveSig] int Show(IntPtr hwndOwner);
+        [PreserveSig] int SetFileTypes(uint cFileTypes, [In] IntPtr rgFilterSpec);
+        [PreserveSig] int SetFileTypeIndex(uint iFileType);
+        [PreserveSig] int GetFileTypeIndex(out uint piFileType);
+        [PreserveSig] int Advise([In, MarshalAs(UnmanagedType.Interface)] object pfde, out uint pdwCookie);
+        [PreserveSig] int Unadvise(uint dwCookie);
+        [PreserveSig] int SetOptions(uint fos);
+        [PreserveSig] int GetOptions(out uint pfos);
+        [PreserveSig] int SetDefaultFolder([In, MarshalAs(UnmanagedType.Interface)] object psi);
+        [PreserveSig] int SetFolder([In, MarshalAs(UnmanagedType.Interface)] object psi);
+        [PreserveSig] int GetFolder([MarshalAs(UnmanagedType.Interface)] out object ppsi);
+        [PreserveSig] int GetCurrentSelection([MarshalAs(UnmanagedType.Interface)] out object ppsi);
+        [PreserveSig] int SetFileName([In, MarshalAs(UnmanagedType.LPWStr)] string pszName);
+        [PreserveSig] int GetFileName([Out, MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+        [PreserveSig] int SetTitle([In, MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+        [PreserveSig] int SetOkButtonLabel([In, MarshalAs(UnmanagedType.LPWStr)] string pszText);
+        [PreserveSig] int SetFileNameLabel([In, MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+        [PreserveSig] int GetResult([MarshalAs(UnmanagedType.Interface)] out object ppsi);
+        [PreserveSig] int AddPlace([In, MarshalAs(UnmanagedType.Interface)] object psi, int fdap);
+        [PreserveSig] int SetDefaultExtension([In, MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);
+        [PreserveSig] int Close(int hr);
+        [PreserveSig] int SetClientGuid([In] ref Guid guid);
+        [PreserveSig] int ClearClientData();
+        [PreserveSig] int SetFilter([In, MarshalAs(UnmanagedType.Interface)] object pFilter);
+        [PreserveSig] int GetResults([MarshalAs(UnmanagedType.Interface)] out object ppenum);
+        [PreserveSig] int GetSelectedItems([MarshalAs(UnmanagedType.Interface)] out object ppsai);
     }
-    return $null
+
+    [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IShellItem
+    {
+        [PreserveSig] int BindToHandler([In, MarshalAs(UnmanagedType.Interface)] object pbc,
+            [In] ref Guid bhid, [In] ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out object ppv);
+        [PreserveSig] int GetParent([MarshalAs(UnmanagedType.Interface)] out object ppsi);
+        [PreserveSig] int GetDisplayName(uint sigdnName, [Out, MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+        [PreserveSig] int GetAttributes(ulong sfgaoMask, out ulong psfgaoAttribs);
+        [PreserveSig] int Compare([In, MarshalAs(UnmanagedType.Interface)] object psi, int hint, out int piOrder);
+    }
+
+    public static class FolderPicker
+    {
+        const uint FOS_PICKFOLDERS     = 0x20;
+        const uint FOS_FORCEFILESYSTEM = 0x40;
+        const uint FOS_PATHMUSTEXIST   = 0x800;
+        const uint SIGDN_FILESYSPATH   = 0x80058000;
+
+        // Returns the selected folder path, or null if the user cancelled or an error occurred.
+        public static string SelectFolder(string title)
+        {
+            try {
+                IFileOpenDialog dlg = (IFileOpenDialog)new FileOpenDialogRCW();
+                dlg.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+                dlg.SetTitle(title);
+                dlg.SetOkButtonLabel("Select Folder");
+
+                if (dlg.Show(IntPtr.Zero) < 0)
+                    return null;   // cancelled (0x800704C7) or any other failure
+
+                object item;
+                dlg.GetResult(out item);
+                IShellItem si = (IShellItem)item;
+
+                string path;
+                si.GetDisplayName(SIGDN_FILESYSPATH, out path);
+                return path;
+            }
+            catch {
+                return null;
+            }
+        }
+    }
+}
+'@
+}
+
+function Select-FolderModern {
+    param([string]$Title = 'Select a folder')
+    return [NativeInterop.FolderPicker]::SelectFolder($Title)
 }
 
 function Invoke-DockerBuild {
@@ -521,7 +598,7 @@ function Build-DiverseImage {
     }
 
     $workDir = "$repoDir\landis-diverse"
-    if (-not (Get-GitRepo -Url 'https://github.com/Klemet/Docker-LANDIS-II-v8-DIVERSE' -Dest $workDir -Commit '69c5509ee6f4e085f023e4e45c1dce4bb583612a')) {
+    if (-not (Get-GitRepo -Url 'https://github.com/Klemet/Docker-LANDIS-II-v8-DIVERSE' -Dest $workDir -Commit '08727e43a760370b8f6c7355f12249de24862239')) {
         return $false
     }
 
@@ -563,19 +640,103 @@ try {
     # Harmless no-op in non-console hosts
 }
 
+# Native modern "pick a folder" dialog (Win10/11 style) via IFileOpenDialog + FOS_PICKFOLDERS.
+# The COM interop is done in C# (where coclass->interface casting is reliable) and exposed
+# as a simple static method. Unlike the old OpenFileDialog hack, the dialog's "Select Folder"
+# button always confirms the highlighted folder instead of sometimes just navigating into it.
+if (-not ("NativeInterop.FolderPicker" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace NativeInterop
+{
+    [ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+    public class FileOpenDialogRCW { }
+
+    [ComImport, Guid("42F85136-DB7E-439C-85F1-E4075D135FC8"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IFileOpenDialog
+    {
+        [PreserveSig] int Show(IntPtr hwndOwner);
+        [PreserveSig] int SetFileTypes(uint cFileTypes, [In] IntPtr rgFilterSpec);
+        [PreserveSig] int SetFileTypeIndex(uint iFileType);
+        [PreserveSig] int GetFileTypeIndex(out uint piFileType);
+        [PreserveSig] int Advise([In, MarshalAs(UnmanagedType.Interface)] object pfde, out uint pdwCookie);
+        [PreserveSig] int Unadvise(uint dwCookie);
+        [PreserveSig] int SetOptions(uint fos);
+        [PreserveSig] int GetOptions(out uint pfos);
+        [PreserveSig] int SetDefaultFolder([In, MarshalAs(UnmanagedType.Interface)] object psi);
+        [PreserveSig] int SetFolder([In, MarshalAs(UnmanagedType.Interface)] object psi);
+        [PreserveSig] int GetFolder([MarshalAs(UnmanagedType.Interface)] out object ppsi);
+        [PreserveSig] int GetCurrentSelection([MarshalAs(UnmanagedType.Interface)] out object ppsi);
+        [PreserveSig] int SetFileName([In, MarshalAs(UnmanagedType.LPWStr)] string pszName);
+        [PreserveSig] int GetFileName([Out, MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+        [PreserveSig] int SetTitle([In, MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+        [PreserveSig] int SetOkButtonLabel([In, MarshalAs(UnmanagedType.LPWStr)] string pszText);
+        [PreserveSig] int SetFileNameLabel([In, MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+        [PreserveSig] int GetResult([MarshalAs(UnmanagedType.Interface)] out object ppsi);
+        [PreserveSig] int AddPlace([In, MarshalAs(UnmanagedType.Interface)] object psi, int fdap);
+        [PreserveSig] int SetDefaultExtension([In, MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);
+        [PreserveSig] int Close(int hr);
+        [PreserveSig] int SetClientGuid([In] ref Guid guid);
+        [PreserveSig] int ClearClientData();
+        [PreserveSig] int SetFilter([In, MarshalAs(UnmanagedType.Interface)] object pFilter);
+        [PreserveSig] int GetResults([MarshalAs(UnmanagedType.Interface)] out object ppenum);
+        [PreserveSig] int GetSelectedItems([MarshalAs(UnmanagedType.Interface)] out object ppsai);
+    }
+
+    [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IShellItem
+    {
+        [PreserveSig] int BindToHandler([In, MarshalAs(UnmanagedType.Interface)] object pbc,
+            [In] ref Guid bhid, [In] ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out object ppv);
+        [PreserveSig] int GetParent([MarshalAs(UnmanagedType.Interface)] out object ppsi);
+        [PreserveSig] int GetDisplayName(uint sigdnName, [Out, MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+        [PreserveSig] int GetAttributes(ulong sfgaoMask, out ulong psfgaoAttribs);
+        [PreserveSig] int Compare([In, MarshalAs(UnmanagedType.Interface)] object psi, int hint, out int piOrder);
+    }
+
+    public static class FolderPicker
+    {
+        const uint FOS_PICKFOLDERS     = 0x20;
+        const uint FOS_FORCEFILESYSTEM = 0x40;
+        const uint FOS_PATHMUSTEXIST   = 0x800;
+        const uint SIGDN_FILESYSPATH   = 0x80058000;
+
+        // Returns the selected folder path, or null if the user cancelled or an error occurred.
+        public static string SelectFolder(string title)
+        {
+            try {
+                IFileOpenDialog dlg = (IFileOpenDialog)new FileOpenDialogRCW();
+                dlg.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+                dlg.SetTitle(title);
+                dlg.SetOkButtonLabel("Select Folder");
+
+                if (dlg.Show(IntPtr.Zero) < 0)
+                    return null;   // cancelled (0x800704C7) or any other failure
+
+                object item;
+                dlg.GetResult(out item);
+                IShellItem si = (IShellItem)item;
+
+                string path;
+                si.GetDisplayName(SIGDN_FILESYSPATH, out path);
+                return path;
+            }
+            catch {
+                return null;
+            }
+        }
+    }
+}
+"@
+}
+
 function Select-FolderModern {
     param([string]$Title = 'Select a folder')
-    $dlg = New-Object System.Windows.Forms.OpenFileDialog
-    $dlg.Title            = $Title
-    $dlg.Filter           = 'Folders|*.folder'
-    $dlg.FileName         = 'Select Folder'
-    $dlg.CheckFileExists  = $false
-    $dlg.CheckPathExists  = $true
-    $dlg.ValidateNames    = $false
-    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        return [System.IO.Path]::GetDirectoryName($dlg.FileName)
-    }
-    return $null
+    return [NativeInterop.FolderPicker]::SelectFolder($Title)
 }
 
 Write-Host ""
@@ -674,38 +835,72 @@ function Install-Launcher {
 
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
-    $scriptDir = Split-Path -Parent $PSCommandPath
-    $copyLauncher = Join-Path $scriptDir "LANDIS-II-Docker-Launcher.ps1"
-    $copyUninstall = Join-Path $scriptDir "Uninstall-LANDIS-II-Launcher.ps1"
+    # Locate the package folder containing this installer's sibling .exe files.
+    # When launched via the compiled .exe, the C# launcher sets LANDIS_LAUNCHER_DIR
+    # to the folder that contains it; otherwise fall back to the script's folder.
+    $packageDir = $env:LANDIS_LAUNCHER_DIR
+    if (-not $packageDir -or -not (Test-Path -LiteralPath $packageDir)) {
+        $packageDir = Split-Path -Parent $PSCommandPath
+    }
 
-    if (Test-Path $copyLauncher) {
-        Copy-Item -Force $copyLauncher "$installDir\LANDIS-II-Docker-Launcher.ps1"
-        Write-Host "  [✓] Launcher copied from script directory" -ForegroundColor Green
+    # Prefer shipping the .exe versions; fall back to the embedded .ps1 if the
+    # exes aren't present (e.g. someone runs this installer .ps1 directly).
+    $launcherExe   = Join-Path $packageDir "LANDIS-II-Docker-Launcher.exe"
+    $uninstallExe  = Join-Path $packageDir "Uninstall-LANDIS-II-Launcher.exe"
+
+    $launcherTarget  = $null
+    $uninstallTarget = $null
+
+    if (Test-Path -LiteralPath $launcherExe) {
+        Copy-Item -Force $launcherExe "$installDir\LANDIS-II-Docker-Launcher.exe"
+        $launcherTarget = "$installDir\LANDIS-II-Docker-Launcher.exe"
+        Write-Host "  [✓] Launcher installed ($launcherTarget)" -ForegroundColor Green
     } else {
         Set-Content -Path "$installDir\LANDIS-II-Docker-Launcher.ps1" -Value $launcherContent -Encoding UTF8
-        Write-Host "  [✓] Launcher written (embedded)" -ForegroundColor Green
+        $launcherTarget = "$installDir\LANDIS-II-Docker-Launcher.ps1"
+        Write-Host "  [✓] Launcher installed (embedded .ps1)" -ForegroundColor Green
     }
 
-    if (Test-Path $copyUninstall) {
-        Copy-Item -Force $copyUninstall "$installDir\Uninstall-LANDIS-II-Launcher.ps1"
-        Write-Host "  [✓] Uninstaller copied from script directory" -ForegroundColor Green
+    if (Test-Path -LiteralPath $uninstallExe) {
+        Copy-Item -Force $uninstallExe "$installDir\Uninstall-LANDIS-II-Launcher.exe"
+        $uninstallTarget = "$installDir\Uninstall-LANDIS-II-Launcher.exe"
+        Write-Host "  [✓] Uninstaller installed ($uninstallTarget)" -ForegroundColor Green
     } else {
         Set-Content -Path "$installDir\Uninstall-LANDIS-II-Launcher.ps1" -Value $uninstallContent -Encoding UTF8
-        Write-Host "  [✓] Uninstaller written (embedded)" -ForegroundColor Green
+        $uninstallTarget = "$installDir\Uninstall-LANDIS-II-Launcher.ps1"
+        Write-Host "  [✓] Uninstaller installed (embedded .ps1)" -ForegroundColor Green
     }
 
-    # Start Menu shortcut (all users)
+    # Start Menu shortcuts (all users)
     New-Item -ItemType Directory -Force -Path $shortcutDir | Out-Null
     $WshShell = New-Object -ComObject WScript.Shell
+
     $shortcut = $WshShell.CreateShortcut("$shortcutDir\LANDIS-II Docker Launcher.lnk")
-    $shortcut.TargetPath = "powershell.exe"
-    $shortcut.Arguments = '-ExecutionPolicy Bypass -File "C:\Program Files\LANDIS-II Docker Launcher\LANDIS-II-Docker-Launcher.ps1"'
-    $shortcut.WorkingDirectory = "C:\Program Files\LANDIS-II Docker Launcher"
-    $shortcut.IconLocation = "powershell.exe,0"
+    if ($launcherTarget -like '*.exe') {
+        $shortcut.TargetPath = $launcherTarget
+        $shortcut.IconLocation = "$launcherTarget,0"
+    } else {
+        $shortcut.TargetPath = "powershell.exe"
+        $shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$launcherTarget`""
+        $shortcut.IconLocation = "powershell.exe,0"
+    }
+    $shortcut.WorkingDirectory = $installDir
     $shortcut.Save()
 
+    $uninstallShortcut = $WshShell.CreateShortcut("$shortcutDir\Uninstall LANDIS-II Docker Launcher.lnk")
+    if ($uninstallTarget -like '*.exe') {
+        $uninstallShortcut.TargetPath = $uninstallTarget
+        $uninstallShortcut.IconLocation = "$uninstallTarget,0"
+    } else {
+        $uninstallShortcut.TargetPath = "powershell.exe"
+        $uninstallShortcut.Arguments = "-ExecutionPolicy Bypass -File `"$uninstallTarget`""
+        $uninstallShortcut.IconLocation = "powershell.exe,0"
+    }
+    $uninstallShortcut.WorkingDirectory = $installDir
+    $uninstallShortcut.Save()
+
     Remove-Item -Force $sentinel -ErrorAction SilentlyContinue
-    Write-Host "  [✓] Start Menu shortcut created" -ForegroundColor Green
+    Write-Host "  [✓] Start Menu shortcuts created" -ForegroundColor Green
     Write-Host "  [✓] Launcher installed to $installDir" -ForegroundColor Green
 }
 
